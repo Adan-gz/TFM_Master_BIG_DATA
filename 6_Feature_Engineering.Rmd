@@ -1,0 +1,488 @@
+---
+title: "6_Feature_Engineering"
+author: "Romén Adán"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,message = FALSE)
+```
+
+# Introducción
+
+Documento con todo el código necesario para realizar el apartado 6.2 del proyecto. 
+
+
+```{r}
+
+source('1_get_data.R',encoding = 'UTF-8')
+
+source('best_xgboost.R',encoding = 'UTF-8')
+
+library(tidymodels)
+
+
+split_sj <- initial_time_split( data_sj, prop = .8)
+split_iq <- initial_time_split( data_iq, prop = .8)
+```
+
+
+# MES + INTERACCION
+
+```{r}
+
+recipe_mes_int <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE),
+                 'mes' = factor( paste0('mes_',as.character(mes) ) ) ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize( all_numeric_predictors() ) %>% 
+    
+    step_dummy( mes, one_hot = TRUE )  %>% 
+
+    step_interact( ~ starts_with('mes_'):weekofyear  ) %>%
+    step_interact( ~ starts_with('mes_'):reanalysis_specific_humidity_g_per_kg  ) %>%
+    step_interact( ~ starts_with('mes_'):reanalysis_dew_point_temp_k  ) %>%
+    step_interact( ~ starts_with('mes_'):station_avg_temp_c  ) %>%
+    step_interact( ~ starts_with('mes_'):reanalysis_max_air_temp_k  ) %>% 
+    
+    step_nzv(  all_numeric_predictors() )
+    
+
+}
+
+```
+
+# *Binning* numericas + Mes
+
+```{r}
+recipe_binning_mes <- function(df){
+  
+ recipe( total_cases ~ ., data = df ) %>% 
+  
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+
+    step_nzv(  all_numeric_predictors() ) %>% 
+     
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_discretize( all_numeric_predictors(),num_breaks = 4 ) %>% 
+
+    step_dummy( all_nominal_predictors(), one_hot = TRUE )
+
+}
+
+```
+
+
+# Cambiar el valor de las features por su promedio en cada mes
+
+```{r}
+
+get_avg_month <- function(df){
+   df %>% 
+      mutate( mes = lubridate::month(week_start_date, label = TRUE) ) %>% 
+      group_by( year,mes ) %>% 
+      mutate( across( -c( weekofyear, week_start_date,city),
+                    mean, na.rm = TRUE ) ) %>% 
+      select( -mes ) %>% 
+      ungroup()
+}
+
+recipe_mean_mes <- function(df){
+
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize(all_numeric_predictors()) %>% 
+    
+    step_dummy( mes, one_hot = TRUE )
+}
+
+```
+
+
+# Diferencia entre t y t-16
+
+```{r}
+
+vars_to_lag <- data %>% select(-c(city,year,week_start_date,weekofyear,
+                                  total_cases)) %>% names()
+
+recipe_dif16 <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    timetk::step_diff( all_of(vars_to_lag), lag = 16 ) %>% 
+    
+    step_normalize(all_numeric_predictors()) %>% 
+    
+    step_dummy( mes, one_hot = TRUE )
+}
+
+
+```
+
+# Reduccion de dimensiones por PCA
+
+
+```{r}
+vars_to_pca <- vars_to_lag
+
+recipe_pca <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize(all_numeric_predictors()) %>% 
+    
+    step_pca( all_of(vars_to_pca), threshold = .85 ) %>% 
+    
+    step_dummy( mes, one_hot = TRUE ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) 
+}
+
+# temp <- bake(prep(recipe_pca(data_sj)), new_data=NULL)
+
+
+```
+
+
+
+# Timetk
+
+
+```{r}
+recipe_timetk <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+
+    timetk::step_timeseries_signature(week_start_date) %>% 
+
+    step_rm( c(city, week_start_date, year, weekofyear) ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize(all_numeric_predictors()) %>% 
+    
+    step_dummy( all_nominal_predictors(), one_hot = TRUE ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) %>% 
+    
+    step_corr( all_numeric_predictors() )
+}
+```
+
+# Fit modelos & Performance
+
+```{r lista_recipes }
+
+list_recipe <- list(
+  'recipe_mes_int' = recipe_mes_int,
+  'recipe_binning_mes' = recipe_binning_mes,
+  'recipe_mean_mes' = recipe_mean_mes, # este tengo que hacerlo más manual
+  'recipe_dif16' = recipe_dif16, # tengo que hacerlo manual
+  'recipe_pca' = recipe_pca,
+  'recipe_timetk' = recipe_timetk
+)
+
+```
+
+
+
+```{r}
+
+performance_models_recipe <- purrr::map2(
+  
+  list_recipe, names(list_recipe),
+  
+  function(recip,name_rep){
+    
+    print(paste0('Modelo: ', name_rep))
+    
+    tryCatch({
+          rep_temp_sj <- recip( training(split_sj) )
+    rep_temp_iq <- recip( training(split_iq) )
+    
+    fit_sj <- last_fit( object = mod_xgboost_best_sj, preprocessor = rep_temp_sj,
+                          split = split_sj, metrics = metric_set(mae) )
+    
+    fit_iq <- last_fit( object = mod_xgboost_best_iq, preprocessor = rep_temp_iq,
+                          split = split_iq, metrics = metric_set(mae) )
+
+    pred_sj <- fit_sj$.predictions[[1]][,c('.pred','total_cases')]
+
+    pred_iq <- fit_iq$.predictions[[1]][,c('.pred','total_cases')]
+
+    pred_temp <- c(pred_sj$.pred,pred_iq$.pred)
+    total_cases <-c(pred_sj$total_cases,pred_iq$total_cases)
+
+    mae_ambas <- yardstick::mae_vec( truth = total_cases, pred_temp )
+
+    performance <- tibble(
+      'Modelo' = rep(name_rep,3),
+      'Ciudad' = c('San Juan','Iquitos','Ambas'),
+      'MAE' = c( collect_metrics(fit_sj)$.estimate,
+                 collect_metrics(fit_iq)$.estimate,
+                 mae_ambas ) ) %>%
+      mutate( MAE = round(MAE,2) ) %>%
+      tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+
+    return(performance)
+    },
+    error = function(e) NULL
+    
+    )
+    
+
+    
+  }
+) 
+
+
+```
+
+```{r}
+performance_models_recipe <- performance_models_recipe %>% 
+  bind_rows() %>% 
+  arrange(Ambas)
+```
+
+
+```{r}
+saveRDS(performance_models_recipe, 'Perfomance/6_modelos_fe.rds' )
+library(flextable)
+flextable( performance_models_recipe ) %>% 
+  flextable::theme_vanilla() %>% 
+  flextable::save_as_docx( path = 'Perfomance/6_modelos_fe.docx' )
+```
+
+
+# Dif16 San Juan + Binning Iquitos
+
+
+```{r}
+performance_dif_binning <- purrr::map_df(
+  
+  'Dif (SJ) & Binning (IQ)',
+  
+  function(name_rep){
+    
+    rep_temp_sj <- recipe_dif16( training(split_sj) )
+    rep_temp_iq <- recipe_binning_mes( training(split_iq) )
+    
+    fit_sj <- last_fit( object = mod_xgboost_best_sj, preprocessor = rep_temp_sj,
+                          split = split_sj, metrics = metric_set(mae) )
+    
+    fit_iq <- last_fit( object = mod_xgboost_best_iq, preprocessor = rep_temp_iq,
+                          split = split_iq, metrics = metric_set(mae) )
+
+    pred_sj <- fit_sj$.predictions[[1]][,c('.pred','total_cases')]
+
+    pred_iq <- fit_iq$.predictions[[1]][,c('.pred','total_cases')]
+
+    pred_temp <- c(pred_sj$.pred,pred_iq$.pred)
+    total_cases <-c(pred_sj$total_cases,pred_iq$total_cases)
+
+    mae_ambas <- yardstick::mae_vec( truth = total_cases, pred_temp )
+
+    performance <- tibble(
+      'Modelo' = rep(name_rep,3),
+      'Ciudad' = c('San Juan','Iquitos','Ambas'),
+      'MAE' = c( collect_metrics(fit_sj)$.estimate,
+                 collect_metrics(fit_iq)$.estimate,
+                 mae_ambas ) ) %>%
+      mutate( MAE = round(MAE,2) ) %>%
+      tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+
+    return(performance)
+  }
+) 
+```
+
+```{r}
+performance_dif_binning
+```
+
+
+
+```{r}
+performance_models_recipe <- performance_models_recipe %>% 
+  bind_rows(performance_dif_binning) %>% 
+  arrange(Ambas)
+```
+
+
+```{r}
+saveRDS(performance_models_recipe, 'Perfomance/6_modelos_fe.rds' )
+library(flextable)
+flextable( performance_models_recipe ) %>% 
+  flextable::theme_vanilla() %>% 
+  flextable::save_as_docx( path = 'Perfomance/6_modelos_fe.docx' )
+```
+
+# Tuning preprocesamiento combinado
+
+```{r}
+
+recipe_dif16_sj <- recipe_dif16( training( split_sj ) )
+recipe_binning_iq <- recipe_binning_mes( training( split_iq ) )
+
+split_tune_sj_rolling <- rolling_origin( data_sj, initial = 650, assess = 150, skip = 50 )
+split_tune_iq_rolling <- rolling_origin( data_iq, initial = 400, assess = 50,skip = 25 )
+
+mod_xgboost_tune <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth = tune(),trees = tune(),learn_rate = tune(),
+           mtry = tune() , min_n = tune(), loss_reduction = tune())
+
+grid_xgboost <- dials::grid_max_entropy( 
+  tree_depth(),trees(),learn_rate(),mtry(range = c(2,10) ) , min_n(),
+  loss_reduction(), size = 30 )
+
+
+fit_tune_sq <- tune_grid(
+  object = mod_xgboost_tune,
+  preprocessor = recipe_dif16_sj,
+  resamples = split_tune_sj_rolling,
+  grid  = grid_xgboost,
+  metrics = metric_set(mae),
+  control = control_grid(verbose = T)
+  
+)
+
+fit_tune_iq <- tune_grid(
+  object = mod_xgboost_tune,
+  preprocessor = recipe_binning_iq,
+  resamples = split_tune_iq_rolling,
+  grid  = grid_xgboost,
+  metrics = metric_set(mae),
+  control = control_grid(verbose = T)
+  
+)
+
+```
+
+```{r}
+collect_metrics(fit_tune_sq) %>% 
+  
+  ggplot( aes( trees, mean ) )+
+  
+  geom_point()+
+  
+  geom_line()
+  
+
+collect_metrics(fit_tune_sq) %>% 
+  
+  ggplot( aes( loss_reduction, mean ) )+
+  
+  geom_point()+
+  
+  geom_line()
+
+```
+
+**Mejores modelos**
+
+```{r}
+best_xgboost_fe <- bind_rows( select_best(fit_tune_sq), select_best(fit_tune_iq) ) %>% 
+  mutate( 'city'= c('San Juan','Iquitos'), .before = 1 ) %>% 
+  select( -'.config')
+```
+
+
+```{r}
+
+mod_xgboost_best_fe_sj <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost_fe$tree_depth[1],
+           trees          = best_xgboost_fe$trees[1],
+           learn_rate     = best_xgboost_fe$learn_rate[1],
+           mtry           = best_xgboost_fe$mtry[1],
+           min_n          = best_xgboost_fe$min_n[1], 
+           loss_reduction = best_xgboost_fe$loss_reduction[1])
+
+mod_xgboost_best_fe_iq <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost_fe$tree_depth[2],
+           trees          = best_xgboost_fe$trees[2],
+           learn_rate     = best_xgboost_fe$learn_rate[2],
+           mtry           = best_xgboost_fe$mtry[2],
+           min_n          = best_xgboost_fe$min_n[2], 
+           loss_reduction = best_xgboost_fe$loss_reduction[2])
+
+
+
+performance_dif_binning_tuning <- purrr::map_df(
+  
+  'Dif (SJ) & Binning (IQ) tuning',
+  
+  function(name_rep){
+    
+    rep_temp_sj <- recipe_dif16( training(split_sj) )
+    rep_temp_iq <- recipe_binning_mes( training(split_iq) )
+    
+    fit_sj <- last_fit( object = mod_xgboost_best_fe_sj, preprocessor = rep_temp_sj,
+                          split = split_sj, metrics = metric_set(mae) )
+    
+    fit_iq <- last_fit( object = mod_xgboost_best_fe_iq, preprocessor = rep_temp_iq,
+                          split = split_iq, metrics = metric_set(mae) )
+
+    pred_sj <- fit_sj$.predictions[[1]][,c('.pred','total_cases')]
+
+    pred_iq <- fit_iq$.predictions[[1]][,c('.pred','total_cases')]
+
+    pred_temp <- c(pred_sj$.pred,pred_iq$.pred)
+    total_cases <-c(pred_sj$total_cases,pred_iq$total_cases)
+
+    mae_ambas <- yardstick::mae_vec( truth = total_cases, pred_temp )
+
+    performance <- tibble(
+      'Modelo' = rep(name_rep,3),
+      'Ciudad' = c('San Juan','Iquitos','Ambas'),
+      'MAE' = c( collect_metrics(fit_sj)$.estimate,
+                 collect_metrics(fit_iq)$.estimate,
+                 mae_ambas ) ) %>%
+      mutate( MAE = round(MAE,2) ) %>%
+      tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+
+    return(performance)
+  }
+) 
+
+```
+
+```{r}
+performance_dif_binning_tuning
+```
+
+

@@ -1,0 +1,413 @@
+---
+title: "5_2_Residuos_XGBOOST"
+author: "Romén Adán"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,message = FALSE)
+```
+
+# Introducción
+
+Documento con todo el código necesario para realizar el apartado 6.1 del proyecto. 
+
+```{r eval=FALSE}
+
+source('1_get_data.R',encoding = 'UTF-8')
+
+best_xgboost <- readRDS('Modelos/5_best_xgboost.RDS')
+
+
+library(tidymodels)
+
+split_sj <- initial_time_split( data_sj, prop = .8)
+split_iq <- initial_time_split( data_iq, prop = .8)
+
+
+```
+
+```{r}
+library(dplyr);library(ggplot2);library(patchwork)
+```
+
+
+# Recipe
+
+```{r eval=FALSE}
+recipe_base <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv() %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize( all_numeric_predictors() ) 
+}
+recipe_sj <- recipe_base( training( split_sj ) )
+recipe_iq <- recipe_base( training( split_iq ) )
+
+```
+
+# Modelos
+
+```{r eval = FALSE }
+mod_xgboost_best_sj <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost$tree_depth[1],
+           trees          = best_xgboost$trees[1],
+           learn_rate     = best_xgboost$learn_rate[1],
+           mtry           = best_xgboost$mtry[1],
+           min_n          = best_xgboost$min_n[1], 
+           loss_reduction = best_xgboost$loss_reduction[1])
+
+mod_xgboost_best_iq <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost$tree_depth[2],
+           trees          = best_xgboost$trees[2],
+           learn_rate     = best_xgboost$learn_rate[2],
+           mtry           = best_xgboost$mtry[2],
+           min_n          = best_xgboost$min_n[2], 
+           loss_reduction = best_xgboost$loss_reduction[2])
+```
+
+# Fit
+
+```{r eval = FALSE }
+fit_sj <- last_fit( object = mod_xgboost_best_sj, preprocessor = recipe_sj,
+                    split = split_sj, metrics = metric_set(mae) )
+
+fit_iq <- last_fit( object = mod_xgboost_best_iq, preprocessor = recipe_iq,
+                    split = split_iq, metrics = metric_set(mae) )
+    
+```
+
+# Análisis de residuos
+
+```{r eval = FALSE }
+residuos_sj <- bind_cols( testing(split_sj),
+                          collect_predictions(fit_sj) %>%
+                            select( 'pred' = .pred )
+                          ) %>% 
+  mutate( pred = round(pred),
+          residuo = total_cases-pred) %>% 
+  select( city, week_start_date, pred, total_cases, residuo, everything(.) ) %>% 
+  mutate( city = 'San Juan' )
+
+residuos_iq <- bind_cols( testing(split_iq),
+                          collect_predictions(fit_iq) %>%
+                            select( 'pred' = .pred )
+                          ) %>% 
+    mutate( pred = round(pred),
+          residuo = total_cases-pred) %>% 
+  select( city, week_start_date, pred, total_cases, residuo, everything(.) ) %>% 
+  mutate( city = 'Iquitos' )
+
+residuos <- bind_rows( residuos_sj, residuos_iq ) %>% 
+  mutate( city = forcats::fct_relevel(city,'San Juan') )
+
+saveRDS(residuos,'Perfomance/residuos_5_xgboost.RDS')
+
+```
+
+```{r}
+residuos <- readRDS('Perfomance/residuos_5_xgboost.RDS')
+residuos_sj <- residuos %>% filter(city == 'San Juan')
+residuos_iq <- residuos %>% filter(city == 'Iquitos')
+```
+
+
+```{r}
+p_real_pred_tiempo_xgboost <- residuos %>% 
+  ggplot( aes( x = week_start_date ) )+
+  
+  geom_line(aes( y = total_cases, color = 'Real' ), size = .8)+
+  
+  geom_line(aes( y = pred, color = 'Predicho'), size = .8)+
+  
+  labs( x = NULL,y=NULL,color = NULL)+
+  
+  scale_x_date( 
+    breaks = breaks_pretty(10),
+    labels = scales::label_date_short() )+
+  
+  theme_light()+
+  
+      theme(           strip.text = element_text( size = 14 ),
+
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 )
+         )+
+  
+  facet_wrap( ~ city, scales = 'free', ncol = 1 )
+
+p_real_pred_tiempo_xgboost
+```
+
+
+
+```{r}
+
+set.seed(123)
+p_real_resid_sj <- residuos_sj %>% 
+  ggplot( aes( x = pred, y = total_cases ) )+
+  
+  geom_jitter( aes( color = factor(year) ), size = 3 )+
+  
+  geom_hline( yintercept = 50, linetype = 2 )+
+  
+  geom_vline( xintercept = 50, linetype = 2 )+
+  
+  scale_color_viridis_d( option = 'A' )+
+  
+  labs( x = 'Predicho',y='Real', color = NULL)+
+  
+  theme_light()+
+
+    theme( legend.position = 'bottom' ,
+                      strip.text = element_text( size = 14 ),
+
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 )
+         )+
+  
+  facet_wrap( ~ city, scales = 'free', ncol = 2 )+
+  
+  coord_cartesian(xlim = c(0,50))
+
+set.seed(123)
+p_real_resid_iq <- residuos_iq %>% 
+  ggplot( aes( x = pred, y = total_cases ) )+
+  
+  geom_jitter( aes( color = factor(year) ), size = 3 )+
+
+  geom_hline( yintercept = 15, linetype = 2 )+
+  
+  geom_vline( xintercept = 15, linetype = 2 )+
+  
+  scale_color_viridis_d( option = 'A')+
+  
+  labs( x = 'Predicho',y='Real', color = NULL)+
+  
+  theme_light()+
+  
+    theme( legend.position = 'bottom' ,
+           strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 )
+         )+
+  
+  facet_wrap( ~ city, scales = 'free', ncol = 2 )
+  
+  coord_cartesian(xlim = c(0,15))
+
+
+
+p_real_resid <- p_real_resid_sj + p_real_resid_iq
+p_real_resid
+```
+
+
+
+```{r}
+set.seed(123)
+p_resid_mes_sj <- residuos_sj %>% 
+  
+  mutate( mes = lubridate::month( week_start_date, label = TRUE,abbr = TRUE ),
+          above_10 = ifelse( residuo >= 5, 'Sí','No') ) %>% 
+  
+  ggplot( aes( mes, residuo ) )+
+  
+  geom_violin()+
+
+  geom_jitter( aes( color = above_10, size = above_10 ), alpha = .7 )+
+
+  scale_size_manual( values = c('Sí'=4,'No'=2.5) )+
+  
+  scale_color_manual( values = c('Sí'='#f8766d','No'='#00bfc4') )+
+  
+  labs( x = NULL, y = 'Residuo', color = 'Residuo >= 5',size = 'Residuo >= 5' )+
+  
+  theme_light()+
+  
+    theme( legend.position = 'bottom' ,
+           strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 )
+         )+
+  
+  facet_wrap(~city)
+  
+
+set.seed(123)
+p_resid_mes_iq <- residuos_iq %>% 
+  
+  mutate( mes = lubridate::month( week_start_date, label = TRUE,abbr = TRUE ),
+          above_10 = ifelse( residuo >= 5, 'Sí','No') ) %>% 
+  
+  ggplot( aes( mes, residuo ) )+
+  
+  geom_violin()+
+
+  geom_jitter( aes( color = above_10, size = above_10 ), alpha = .7)+
+
+  scale_size_manual( values = c('Sí'=4,'No'=2.5) )+
+  
+  scale_color_manual( values = c('Sí'='#f8766d','No'='#00bfc4') )+
+  
+  labs( x = NULL, y = 'Residuo', color = 'Residuo >= 5',size = 'Residuo >= 5' )+
+  
+  theme_light()+
+  
+    theme( legend.position = 'bottom' ,
+           strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 )
+         )+
+  
+  facet_wrap(~city)
+  
+  
+p_resid_mes <- p_resid_mes_sj + p_resid_mes_iq
+```
+
+```{r}
+
+p_dist_resid <- residuos %>% 
+  ggplot(aes( residuo, fill = city ))+
+  geom_histogram( color= 'white' )+
+  geom_vline(xintercept = 10,linetype = 2)+
+    geom_vline(xintercept = -10,linetype = 2)+
+  scale_fill_manual(values =  c('#f8766d','#008d91'))+
+  labs(x='Distribución de los residuos',y='',
+       caption = 'Nota: las líneas discontinuas marcan los valores 10 y -10.')+
+  theme_light()+
+       theme( legend.position = 'none' ,
+           strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 ),
+         plot.caption = element_text(hjust = 0)
+         )+
+  facet_wrap(~city)
+
+
+```
+
+
+```{r}
+p_mes_humedad <- residuos_sj %>% 
+
+  mutate( mes = lubridate::month( week_start_date, label = TRUE,abbr = TRUE ) ) %>% 
+
+  select( mes, reanalysis_specific_humidity_g_per_kg, reanalysis_dew_point_temp_k ) %>% 
+  
+  tidyr::pivot_longer(-mes) %>% 
+  
+  
+  ggplot( aes( mes, value, fill = name ) )+
+  
+  geom_violin()+
+  
+  scale_y_continuous(breaks = breaks_pretty(7))+
+  
+  scale_fill_viridis_d()+
+  
+  labs(x=NULL, y = NULL)+
+  
+  theme_light()+
+  
+  theme( legend.position = 'none' ,
+           strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 ),
+         plot.caption = element_text(hjust = 0)
+         )+
+  
+  facet_wrap(~name, scales = 'free_y')
+
+
+  
+```
+
+# Export
+
+```{r}
+ggsave(plot = p_dist_resid,
+       filename = 'plots/6_FE/p_dist_resid.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+ggsave(plot = p_real_pred_tiempo_xgboost,
+       filename = 'plots/6_FE/p_real_pred_tiempo_xgboost.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+ggsave(plot = p_real_resid,
+       filename = 'plots/6_FE/p_real_resid.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+ggsave(plot = p_resid_mes,
+       filename = 'plots/6_FE/p_resid_mes.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+ggsave(plot = p_mes_humedad,
+       filename = 'plots/6_FE/p_mes_humedad.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+
+```
+
+

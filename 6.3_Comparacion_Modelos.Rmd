@@ -1,0 +1,315 @@
+---
+title: "7_2_Comparacion_Modelos"
+author: "Romén Adán"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,message = FALSE)
+```
+
+
+```{r}
+
+source('get_data.R',encoding = 'UTF-8')
+
+source('best_xgboost.R',encoding = 'UTF-8')
+
+
+library(tidymodels)
+library(patchwork)
+
+split_sj <- initial_time_split( data_sj, prop = .8)
+split_iq <- initial_time_split( data_iq, prop = .8)
+```
+
+# Modelo bestxgboost
+
+```{r}
+recipe_base <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv() %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize( all_numeric_predictors() ) 
+}
+recipe_sj <- recipe_base( training( split_sj ) )
+recipe_iq <- recipe_base( training( split_iq ) )
+
+pred_xgboost <- purrr::map_df(
+  1,
+  function(i){
+    
+    fit_sj <- last_fit( object = mod_xgboost_best_sj, preprocessor = recipe_sj,
+                          split = split_sj, metrics = metric_set(mae) )
+    
+    fit_iq <- last_fit( object = mod_xgboost_best_iq, preprocessor = recipe_iq,
+                          split = split_iq, metrics = metric_set(mae) )
+    
+    pred_sj <- fit_sj$.predictions[[1]][,c('.pred','total_cases')]
+    pred_sj$city <- 'San Juan'
+    pred_sj$fecha <- testing(split_sj)$week_start_date
+      
+    pred_iq <- fit_iq$.predictions[[1]][,c('.pred','total_cases')]
+    pred_iq$city <- 'Iquitos'
+    pred_iq$fecha <- testing(split_iq)$week_start_date
+    
+    bind_rows( pred_sj, pred_iq ) %>% 
+      select( city, fecha, pred = .pred, total_cases ) %>% 
+      mutate( pred = round(pred),
+              pred = ifelse(pred < 0,0,pred),
+              
+              residuo = total_cases - pred)
+  }
+
+) %>% 
+  mutate( 'Modelo'='Best XGBOOST', .before = 1 )
+ 
+
+```
+
+
+# Modelo bestxgboost + feature engineering
+
+```{r}
+
+vars_to_lag <- data %>% select(-c(city,year,week_start_date,weekofyear,
+                                  total_cases)) %>% names()
+recipe_dif16 <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    timetk::step_diff( all_of(vars_to_lag), lag = 16 ) %>% 
+    
+    step_normalize(all_numeric_predictors()) %>% 
+    
+    step_dummy( mes, one_hot = TRUE )
+}
+
+recipe_binning_mes <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_discretize( all_numeric_predictors(),num_breaks = 4,min_unique = 2 ) %>% 
+    
+    step_dummy( all_nominal_predictors(), one_hot = TRUE ) %>% 
+    
+    step_normalize(all_numeric_predictors())
+}
+
+
+
+pred_fe_xgboost <- purrr::map_df(
+  
+  1,
+  
+  function(i){
+    
+    rep_temp_sj <- recipe_dif16( training(split_sj) )
+    rep_temp_iq <- recipe_binning_mes( training(split_iq) )
+    
+    fit_sj <- last_fit( object = mod_xgboost_best_sj, preprocessor = rep_temp_sj,
+                          split = split_sj, metrics = metric_set(mae) )
+    
+    fit_iq <- last_fit( object = mod_xgboost_best_iq, preprocessor = rep_temp_iq,
+                         split = split_iq, metrics = metric_set(mae) )
+
+    pred_sj <- fit_sj$.predictions[[1]][,c('.pred','total_cases')]
+    pred_sj$city <- 'San Juan'
+    pred_sj$fecha <- testing(split_sj)$week_start_date
+    
+    pred_iq <- fit_iq$.predictions[[1]][,c('.pred','total_cases')]
+    pred_iq$city <- 'Iquitos'
+    pred_iq$fecha <- testing(split_iq)$week_start_date
+    
+    bind_rows( pred_sj, pred_iq ) %>%
+     select( city, fecha, pred = .pred, total_cases ) %>%
+     mutate( pred = round(pred),
+             pred = ifelse(pred < 0,0,pred),
+             residuo = total_cases - pred)
+  }
+) %>% 
+  mutate( 'Modelo'='FE & Best XGBOOST', .before = 1 )
+
+```
+
+
+```{r}
+df_pred <- bind_rows( pred_xgboost, pred_fe_xgboost )
+```
+
+
+# PLOTS
+
+## Residuos vs Residuso
+
+```{r}
+
+p_resid_resid_sj <- df_pred %>% 
+  
+  select(city, Modelo, residuo) %>% 
+  
+  filter( city == 'San Juan' ) %>% 
+  
+  tidyr::pivot_wider( names_from = Modelo, values_from = residuo ) %>% 
+  
+  tidyr::unnest() %>% 
+  
+  ggplot( aes( x = `Best XGBOOST`, y = `FE & Best XGBOOST` ) )+
+  
+  geom_point()+
+  
+  geom_vline( xintercept = 0 )+
+  geom_hline( yintercept = 0 )+
+
+  scale_x_continuous(breaks = breaks_pretty(8))+
+  scale_y_continuous(breaks = breaks_pretty(8))+
+  
+  theme_bw()+
+  
+  facet_wrap(~ city, scales = 'free')+
+  
+  coord_cartesian( xlim = c(-50,150), ylim = c(-50,150) )+
+  
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank())+
+  
+  theme( strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 ),
+         plot.caption = element_text(hjust = 0)
+  )
+
+
+p_resid_resid_iq <- df_pred %>% 
+  
+  select(city, Modelo, residuo) %>% 
+  
+  filter( city == 'Iquitos' ) %>% 
+  
+  tidyr::pivot_wider( names_from = Modelo, values_from = residuo ) %>% 
+  
+  tidyr::unnest() %>% 
+  
+  ggplot( aes( x = `Best XGBOOST`, y = `FE & Best XGBOOST` ) )+
+  
+  geom_point()+
+  
+  geom_vline( xintercept = 0 )+
+  geom_hline( yintercept = 0 )+
+  
+  scale_x_continuous(breaks = breaks_pretty(8))+
+  scale_y_continuous(breaks = breaks_pretty(8))+
+  
+  theme_bw()+
+  
+  facet_wrap(~ city, scales = 'free')+
+  
+  # coord_cartesian( xlim = c(-50,150), ylim = c(-50,150) )+
+  
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank())+
+  theme( strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 ),
+         plot.caption = element_text(hjust = 0)
+  )
+
+p_resid_resid <- p_resid_resid_sj + p_resid_resid_iq
+
+ggsave(plot = p_resid_resid,
+       filename = 'plots/6_FE/p_resid_resid.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+```
+
+
+
+```{r}
+p_resid_modelos_time <- df_pred %>% 
+  
+  mutate( city = forcats::fct_relevel(city,'San Juan') ) %>% 
+  
+  ggplot( aes( fecha,residuo, color = Modelo ) )+
+  
+  geom_line( size = 1, alpha = .8 )+
+  
+  geom_hline(yintercept = 0)+
+  
+  labs( x = NULL )+
+  
+  scale_x_date(breaks = breaks_width('3 months'),
+               labels = scales::label_date_short())+
+  
+  scale_colour_manual( values = c(
+    "Best XGBOOST" = '#1B0C42FF',
+    "FE & Best XGBOOST" = '#CF4446FF'
+  ) )+
+  
+  theme_light()+
+  
+  theme(legend.position = 'top',
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())+
+  
+  theme( strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 11 ),
+         axis.text.y = element_text( size = 13 ),
+         plot.caption = element_text(hjust = 0)
+  )+
+  
+  facet_wrap(~city, scales = 'free_x')
+
+
+ggsave(plot = p_resid_modelos_time,
+       filename = 'plots/6_FE/p_resid_modelos_time.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+
+```
+

@@ -1,0 +1,369 @@
+---
+title: "5_Primeros_Modelos"
+author: "Romén Adán"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,message = FALSE)
+```
+
+# Introducción
+
+Documento con todo el código necesario para realizar el apartado 5 del proyecto. 
+
+```{r}
+source('1_get_data.R',encoding = 'UTF-8')
+
+library(tidymodels)
+split_sj <- initial_time_split( data_sj, prop = .8)
+split_iq <- initial_time_split( data_iq, prop = .8)
+```
+
+
+
+# Recipe
+
+```{r}
+recipe_base <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv() %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize( all_numeric_predictors() ) 
+}
+recipe_sj <- recipe_base( training( split_sj ) )
+recipe_iq <- recipe_base( training( split_iq ) )
+
+```
+
+
+# Modelos
+
+```{r}
+library(bonsai);library(baguette) # para lightgbm y bagging
+mod_mars <- mars(mode = "regression", engine = 'earth') 
+mod_bagtrees <- bag_tree(mode = 'regression',engine = 'rpart')
+mod_xgboost <- boost_tree(mode = 'regression',engine = 'xgboost')
+mod_lightgbm <- boost_tree(mode = 'regression',engine = 'lightgbm')
+mod_nnet <- mlp( mode = 'regression',engine = 'nnet' )
+
+
+list_models <- list(
+  'Mars' = mod_mars,'Bagtrees' = mod_bagtrees,
+  'Xgboost' = mod_xgboost,'Lightgbm' = mod_lightgbm,
+  'NNET' = mod_nnet )
+
+
+```
+
+
+## performance conjunto entrenamiento
+
+```{r}
+
+performance_primeros_modelos <- purrr::map2_df(
+  list_models, names(list_models),
+  function( model, model_name ){
+    
+    fit_sj <- last_fit( object = model, preprocessor = recipe_sj,
+                          split = split_sj, metrics = metric_set(mae) )
+    
+    fit_iq <- last_fit( object = model, preprocessor = recipe_iq,
+                          split = split_iq, metrics = metric_set(mae) )
+    
+    pred_sj <- fit_sj$.predictions[[1]][,c('.pred','total_cases')]
+    pred_iq <- fit_iq$.predictions[[1]][,c('.pred','total_cases')]
+    
+    pred_temp <- c(pred_sj$.pred,pred_iq$.pred)
+    total_cases <-c(pred_sj$total_cases,pred_iq$total_cases)
+    
+    mae_ambas <- yardstick::mae_vec( truth = total_cases, pred_temp )
+    
+    performance <- tibble(
+      'Modelo' = rep(model_name,3),
+      'Ciudad' = c('San Juan','Iquitos','Ambas'),
+      'MAE' = c( collect_metrics(fit_sj)$.estimate, 
+                 collect_metrics(fit_iq)$.estimate,
+                 mae_ambas ) ) %>% 
+      mutate( MAE = round(MAE,2) ) %>% 
+      tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+    
+    return(performance)
+  
+  }
+
+)
+
+performance_primeros_modelos <- performance_primeros_modelos %>% 
+  arrange( Ambas )
+
+```
+
+```{r eval=FALSE}
+saveRDS(performance_primeros_modelos, 'Perfomance/primeros_modelos.rds' )
+library(flextable)
+flextable( performance_primeros_modelos ) %>% 
+  flextable::theme_vanilla() %>% 
+  flextable::save_as_docx( path = 'Perfomance/primeros_modelos.docx' )
+```
+
+```{r}
+performance_primeros_modelos
+```
+
+# Cross-Validation
+
+
+```{r}
+split_sj_rolling <- rolling_origin( data_sj,
+           initial = 600, assess = 125, skip = 50 )
+
+split_iq_rolling <- rolling_origin( data_iq,initial = 350, assess = 50,
+                skip = 25 )
+
+# split_sj_rolling
+```
+
+
+```{r}
+
+list_models_cv <- list_models[ c('Bagtrees','Xgboost','Lightgbm') ]
+
+
+performance_cvfold_primeros_modelos <- purrr::map2_df(
+  
+  list_models_cv, names(list_models_cv),
+  
+  function( model, model_name ){
+    
+    fit_sj <- fit_resamples( object = model,  preprocessor = recipe_sj,
+                             resamples = split_sj_rolling, metrics = metric_set(mae),
+                             control = control_resamples(save_pred = TRUE)  )
+    
+    fit_iq <- fit_resamples( object = model,  preprocessor = recipe_iq,
+                             resamples = split_iq_rolling, metrics = metric_set(mae),
+                             control = control_resamples(save_pred = TRUE)  )
+    
+    pred_sj <- collect_predictions(fit_sj)[,c('id','.pred','total_cases')]
+    pred_iq <- collect_predictions(fit_iq)[,c('id','.pred','total_cases')]
+
+    mae_ambas <- bind_rows( pred_sj, pred_iq ) %>% 
+      group_by( id ) %>% 
+      summarise( 'MAE_split' =  yardstick::mae_vec(total_cases, .pred) ) %>% 
+      ungroup() %>% 
+      summarise( 'MAE' = mean(MAE_split) ) %>% 
+      pull(MAE)
+    
+    performance <- tibble(
+      'Modelo' = rep(model_name,3),
+      'Ciudad' = c('San Juan','Iquitos','Ambas'),
+      'MAE' = c( collect_metrics(fit_sj)$mean, 
+                 collect_metrics(fit_iq)$mean,
+                 mae_ambas ) ) %>% 
+      mutate( MAE = round(MAE,2) ) %>% 
+      tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+    
+    return(performance)
+  
+  }
+
+)
+
+performance_cvfold_primeros_modelos <- performance_cvfold_primeros_modelos %>% 
+  arrange( Ambas )
+
+```
+
+
+```{r eval=FALSE}
+saveRDS(performance_cvfold_primeros_modelos, 'Perfomance/primeros_modelos_cvfold.rds' )
+library(flextable)
+flextable( performance_cvfold_primeros_modelos ) %>% 
+  flextable::theme_vanilla() %>% 
+  flextable::save_as_docx( path = 'Perfomance/primeros_modelos_cvfold.docx' )
+```
+
+```{r}
+performance_cvfold_primeros_modelos
+```
+
+
+# tuning xgboost
+
+```{r}
+split_tune_sj_rolling <- rolling_origin( data_sj, initial = 650, assess = 150, skip = 50 )
+split_tune_iq_rolling <- rolling_origin( data_iq,initial = 400, assess = 50,skip = 25 )
+
+mod_xgboost_tune <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth = tune(),trees = tune(),learn_rate = tune(),
+           mtry = tune() , min_n = tune(), loss_reduction = tune())
+
+grid_xgboost <- dials::grid_max_entropy( 
+  tree_depth(),trees(),learn_rate(),mtry(range = c(2,10) ) , min_n(),
+  loss_reduction(), size = 25 )
+
+fit_tune_sq <- tune_grid(
+  object = mod_xgboost_tune,
+  preprocessor = recipe_sj,
+  resamples = split_tune_sj_rolling,
+  grid  = grid_xgboost,
+  metrics = metric_set(mae),
+  control = control_grid(verbose = T)
+  
+)
+
+fit_tune_iq <- tune_grid(
+  object = mod_xgboost_tune,
+  preprocessor = recipe_iq,
+  resamples = split_tune_iq_rolling,
+  grid  = grid_xgboost,
+  metrics = metric_set(mae),
+  control = control_grid(verbose = T)
+  
+)
+```
+
+
+```{r}
+best_xgboost <- bind_rows( select_best(fit_tune_sq), select_best(fit_tune_iq) ) %>% 
+  mutate( 'city'= c('San Juan','Iquitos'), .before = 1 ) %>% 
+  select( -'.config')
+
+saveRDS(best_xgboost,'Modelos/5_best_xgboost.RDS')
+
+```
+
+```{r}
+best_xgboost %>% 
+  mutate( learn_rate = round(loss_reduction,5),
+          loss_reduction = round(loss_reduction,9) )  
+```
+
+
+## Mejor xgboost
+
+```{r}
+
+mod_xgboost_best_sj <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost$tree_depth[1],
+           trees          = best_xgboost$trees[1],
+           learn_rate     = best_xgboost$learn_rate[1],
+           mtry           = best_xgboost$mtry[1],
+           min_n          = best_xgboost$min_n[1], 
+           loss_reduction = best_xgboost$loss_reduction[1])
+
+mod_xgboost_best_iq <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost$tree_depth[2],
+           trees          = best_xgboost$trees[2],
+           learn_rate     = best_xgboost$learn_rate[2],
+           mtry           = best_xgboost$mtry[2],
+           min_n          = best_xgboost$min_n[2], 
+           loss_reduction = best_xgboost$loss_reduction[2])
+
+performance_xgboost_best <- purrr::map_df(
+  'XGBOOST best',
+  function(model_name ){
+    
+    fit_sj <- last_fit( object = mod_xgboost_best_sj, preprocessor = recipe_sj,
+                          split = split_sj, metrics = metric_set(mae) )
+    
+    fit_iq <- last_fit( object = mod_xgboost_best_iq, preprocessor = recipe_iq,
+                          split = split_iq, metrics = metric_set(mae) )
+    
+    pred_sj <- fit_sj$.predictions[[1]][,c('.pred','total_cases')]
+    pred_iq <- fit_iq$.predictions[[1]][,c('.pred','total_cases')]
+    
+    pred_temp <- c(pred_sj$.pred,pred_iq$.pred)
+    total_cases <-c(pred_sj$total_cases,pred_iq$total_cases)
+    
+    mae_ambas <- yardstick::mae_vec( truth = total_cases, pred_temp )
+    
+    performance <- tibble(
+      'Modelo' = rep(model_name,3),
+      'Ciudad' = c('San Juan','Iquitos','Ambas'),
+      'MAE' = c( collect_metrics(fit_sj)$.estimate, 
+                 collect_metrics(fit_iq)$.estimate,
+                 mae_ambas ) ) %>% 
+      mutate( MAE = round(MAE,2) ) %>% 
+      tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+    
+    return(performance)
+  
+  }
+
+)
+
+performance_xgboost_best
+```
+
+
+# predicción competición best xgboost
+
+```{r}
+source('1_get_data.R',encoding = 'UTF-8')
+
+recipe_base_prep_sj <- prep(recipe_base(data_sj) )
+recipe_base_prep_iq <- prep(recipe_base(data_iq) )
+
+data_bake_sj <- bake( recipe_base_prep_sj, new_data = NULL )
+data_bake_iq <- bake( recipe_base_prep_iq, new_data = NULL )
+
+
+test_feat_bake_sj <- bake( recipe_base_prep_sj, new_data = test_feat_sj ) %>% 
+  select(-total_cases)
+test_feat_bake_iq <- bake( recipe_base_prep_iq, new_data = test_feat_iq ) %>% 
+  select(-total_cases)
+
+```
+
+
+```{r}
+best_xgboost <- readRDS('Modelos/5_best_xgboost.RDS')
+
+mod_xgboost_best_sj <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost$tree_depth[1],
+           trees          = best_xgboost$trees[1],
+           learn_rate     = best_xgboost$learn_rate[1],
+           mtry           = best_xgboost$mtry[1],
+           min_n          = best_xgboost$min_n[1], 
+           loss_reduction = best_xgboost$loss_reduction[1])
+
+mod_xgboost_best_iq <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
+  set_args(tree_depth     = best_xgboost$tree_depth[2],
+           trees          = best_xgboost$trees[2],
+           learn_rate     = best_xgboost$learn_rate[2],
+           mtry           = best_xgboost$mtry[2],
+           min_n          = best_xgboost$min_n[2], 
+           loss_reduction = best_xgboost$loss_reduction[2])
+
+
+fit_xgboost_best_sj <- mod_xgboost_best_sj %>% 
+  fit( total_cases ~ ., data = data_bake_sj )
+
+fit_xgboost_best_iq <- mod_xgboost_best_iq %>% 
+  fit( total_cases ~ ., data = data_bake_iq )
+
+bind_rows( test_feat_ori_sj[,1:3], test_feat_ori_iq[,1:3] ) %>% 
+  
+  mutate( 'total_cases' = c(
+    predict( fit_xgboost_best_sj, new_data = test_feat_bake_sj )$.pred,
+    predict( fit_xgboost_best_iq, new_data = test_feat_bake_iq )$.pred  ),
+    
+    'total_cases' = round(total_cases),
+    'total_cases' = ifelse(total_cases < 0, 0, total_cases)
+    ) %>% 
+  readr::write_csv( 'Predicciones/5_bestxgboost.csv' )
+
+
+
+```
+
+MAE: 27.08
+

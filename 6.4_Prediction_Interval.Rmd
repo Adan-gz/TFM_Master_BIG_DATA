@@ -1,0 +1,246 @@
+---
+title: "6_4_Prediction_Interval"
+author: "Romén Adán"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,message = FALSE)
+```
+
+# Introducción
+
+Documento con todo el código necesario para realizar el apartado 6.4 del proyecto. 
+
+```{r}
+
+source('1_get_data.R',encoding = 'UTF-8')
+
+source('best_xgboost.R',encoding = 'UTF-8')
+
+
+library(tidymodels)
+library(patchwork)
+
+split_sj <- initial_time_split( data_sj, prop = .8)
+split_iq <- initial_time_split( data_iq, prop = .8)
+
+# https://medium.com/analytics-vidhya/confidence-interval-vs-prediction-interval-2f9e36f752e3
+
+```
+
+
+# Preprocesamiento
+
+```{r}
+vars_to_lag <- data %>% select(-c(city,year,week_start_date,weekofyear,
+                                  total_cases)) %>% names()
+
+recipe_dif16 <- recipe( total_cases ~ ., data = training(split_sj) ) %>% 
+    
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    timetk::step_diff( all_of(vars_to_lag), lag = 16 ) %>% 
+    
+    step_normalize(all_numeric_predictors()) %>% 
+    
+    step_dummy( mes, one_hot = TRUE )
+
+
+```
+
+
+```{r}
+recipe_binning_mes <- recipe( total_cases ~ ., data = training(split_iq) ) %>% 
+    
+    step_mutate( 'mes' = lubridate::month(week_start_date, label = TRUE) ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv(  all_numeric_predictors() ) %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_discretize( all_numeric_predictors(),num_breaks = 4,min_unique = 2 ) %>% 
+    
+    step_dummy( all_nominal_predictors(), one_hot = TRUE ) %>% 
+    
+    step_normalize(all_numeric_predictors())
+
+
+```
+
+# Fit
+
+```{r}
+
+fit_sj <- last_fit( object = mod_xgboost_best_sj, preprocessor = recipe_dif16,
+                    split = split_sj, metrics = metric_set(mae) )
+fit_iq <- last_fit( object = mod_xgboost_best_iq, preprocessor = recipe_binning_mes,
+                    split = split_iq, metrics = metric_set(mae) )
+```
+
+
+# Predicciones SJ 
+
+```{r}
+
+pred_sj <- collect_predictions( fit_sj ) %>% 
+  select( .pred, total_cases )
+
+mse_sj <- collect_metrics(fit_sj)$.estimate
+
+max_distance_centroid <- sum( (pred_sj$total_cases - mean(pred_sj$total_cases))^2  )
+
+pred_sj <- pred_sj %>% 
+  add_column( 'fecha' = testing(split_sj)$week_start_date,
+              'city' = 'San Juan') %>% 
+  mutate( 
+    .pred_low = .pred - 2.576 * sqrt(
+    
+       mse_sj * (1 + 1/nrow(pred_sj) +  (total_cases-mean(total_cases))^2/max_distance_centroid  )
+       ),
+    .pred_high = .pred + 2.576 * sqrt(
+      
+      mse_sj * (1 + 1/nrow(pred_sj) +  (total_cases-mean(total_cases))^2/max_distance_centroid  )
+    ),
+    )  
+```
+
+# Predicciones IQ 
+
+```{r}
+pred_iq <- collect_predictions( fit_iq ) %>% 
+  select( .pred, total_cases )
+
+mse_iq <- collect_metrics(fit_iq)$.estimate
+
+max_distance_centroid_iq <- sum( (pred_iq$total_cases - mean(pred_iq$total_cases))^2  )
+
+pred_iq <- pred_iq %>% 
+  add_column( 'fecha' = testing(split_iq)$week_start_date,
+              'city' = 'Iquitos') %>% 
+  mutate( 
+    .pred_low = .pred - 2.576 * sqrt(
+      
+      mse_iq * (1 + 1/nrow(pred_iq) +  (total_cases-mean(total_cases))^2/max_distance_centroid_iq  )
+    ),
+    .pred_high = .pred + 2.576 * sqrt(
+      
+      mse_iq * (1 + 1/nrow(pred_iq) +  (total_cases-mean(total_cases))^2/max_distance_centroid_iq  )
+    ),
+  )  
+
+
+
+df_pred <- pred_sj %>% 
+  bind_rows( pred_iq ) %>% 
+  
+  mutate( city = forcats::fct_relevel(city,'San Juan') )
+```
+
+# Cobertura
+
+```{r}
+df_pred %>% 
+  mutate( is_cover = total_cases >= .pred_low & total_cases <= .pred_high ) %>% 
+  group_by(city) %>% 
+  ksnet::count_and_share(is_cover) %>% 
+  filter( is_cover )
+```
+
+# Grafico
+
+```{r}
+
+p_prediction_invterval <- df_pred %>% 
+  
+  ggplot( aes( fecha  ) )+
+  
+  
+  geom_point( aes( y = total_cases ),  color = "#00b2a9" )+
+  
+  geom_pointrange( aes( y = .pred, ymin = .pred_low,ymax=  .pred_high), 
+                   size = .2, alpha = .5 )+
+  scale_x_date(breaks = breaks_width('3 months'),
+               labels = scales::label_date_short())+
+  
+  labs( x= NULL, y = 'Nº de casos' )+
+  theme_light()+
+  
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank())+
+  theme( strip.text = element_text( size = 14 ),
+         legend.text = element_text( size = 13 ),
+         legend.title = element_text( size = 13 ),
+         axis.title.x = element_text( size = 14 ),
+         axis.title.y = element_text( size = 14 ),
+         axis.text.x = element_text( size = 13 ),
+         axis.text.y = element_text( size = 13 ),
+         plot.caption = element_text(hjust = 0)
+  )+
+  
+  facet_wrap(~city, scales = 'free', ncol = 1)
+  
+  
+  
+ggsave(plot = p_prediction_invterval,
+       filename = 'plots/6_FE/p_prediction_invterval.png',
+       type = 'cairo',
+       width  = 4000,
+       height = 2250,
+       dpi    = 320,
+       units = 'px'
+)
+
+```
+
+
+# workboots & spin
+
+Se intentó utilizar los paquetes de [workboots](https://github.com/markjrieke/workboots) y [spin](https://github.com/brshallo/spin), sin embargo, tras horas de ejecución no terminaba. Así que se optó por lo anterior aunque no fuera del todo correcto
+
+```{r eval=FALSE}
+
+wf_sj <- workflow() %>% 
+  add_recipe( recipe_dif16 ) %>% 
+  add_model( mod_xgboost_best_sj )
+
+wf_iq <- workflow() %>% 
+  add_recipe( recipe_binning_mes ) %>% 
+  add_model( mod_xgboost_best_iq )
+
+
+library(workboots)
+# generate predictions from 2000 bootstrap models
+
+set.seed(345)
+pred_sj <- wf_sj %>%
+  predict_boots(
+    n = 5,
+    training_data = training(split_sj),
+    new_data = testing(split_sj)
+  )
+
+
+set.seed(345)
+pred_iq <- wf_iq %>%
+  predict_boots(
+    n = 2000,
+    training_data = training(split_iq),
+    new_data = testing(split_iq)
+  )
+
+
+```
+

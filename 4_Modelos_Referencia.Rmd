@@ -1,0 +1,253 @@
+---
+title: "4_Modelos_Referencia"
+author: "Romén Adán"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,message = FALSE)
+```
+
+# Introducción
+
+Documento con todo el código necesario para realizar el apartado 4 del proyecto. 
+
+```{r}
+source('1_get_data.R',encoding = 'UTF-8')
+
+library(tidymodels);library(forecast);library(glmnet)
+
+split_sj <- initial_time_split( data_sj, prop = .8)
+split_iq <- initial_time_split( data_iq, prop = .8)
+
+```
+
+
+# Auto.ARIMA
+
+## entrenamiento en datos de train
+
+```{r}
+autoarima_sj <- auto.arima(training(split_sj)$total_cases)
+autoarima_iq <- auto.arima(training(split_iq)$total_cases)
+
+pred_sj <- forecast( autoarima_sj, h = nrow(testing(split_sj)) )
+pred_iq <- forecast( autoarima_sj, h = nrow(testing(split_iq)) )
+```
+
+## predicción en competición
+
+
+```{r }
+autoarima_sj_comp <- auto.arima(data_sj$total_cases)
+autoarima_iq_comp <- auto.arima(data_iq$total_cases)
+
+pred_sj_comp <- forecast( autoarima_sj_comp, h = nrow(test_feat_ori_sj) )
+pred_iq_comp <- forecast( autoarima_iq_comp, h = nrow(test_feat_ori_iq) )
+
+bind_rows(
+  test_feat_ori_sj[,1:3] %>% 
+    mutate( 'total_cases' = as_tibble(pred_sj_comp)[[1]] ),
+  
+  test_feat_ori_iq[,1:3] %>% 
+    mutate( 'total_cases' = as_tibble(pred_iq_comp)[[1]] )
+) %>% 
+  mutate( 'total_cases' = round(total_cases),
+          'total_cases' = ifelse(total_cases < 0, 0, total_cases)) %>% 
+  
+  readr::write_csv( 'Predicciones/auto_arima.csv' )
+
+
+
+```
+
+
+
+## performance
+
+```{r}
+
+pred_sj_iq_train <- c(as_tibble(pred_sj)[[1]],as_tibble(pred_iq)[[1]])
+
+performance_autoarima <- tibble(
+  'Modelo' = rep('Auto.Arima',4),
+  'Ciudad' = c('San Juan','Iquitos','Ambas','Competición'),
+  'MAE' = c(
+    mae_vec( truth = pull( testing( split_sj ), total_cases ),
+             estimate = round( as_tibble(pred_sj)[[1]],3 ) ), 
+    
+    mae_vec( truth = pull( testing( split_iq ), total_cases ),
+             estimate = round( as_tibble(pred_iq)[[1]],3 ) ),
+    mae_vec( truth = c( pull( testing( split_sj ), total_cases ),
+                        pull( testing( split_iq ), total_cases ) ),
+             estimate = round(pred_sj_iq_train,3 ) ),
+    33.79
+  )
+) %>% 
+  mutate( MAE = round(MAE,2) ) %>% 
+  
+  tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+
+performance_autoarima
+
+```
+
+# Poisson - Lasso
+
+```{r}
+recipe_base <- function(df){
+  
+  recipe( total_cases ~ ., data = df ) %>% 
+    
+    step_rm( c(city, week_start_date) ) %>% 
+    
+    step_nzv() %>% 
+    
+    step_impute_bag( all_numeric_predictors() ) %>% 
+    
+    step_normalize( all_numeric_predictors() ) 
+}
+recipe_sj <- recipe_base( training( split_sj ) )
+recipe_iq <- recipe_base( training( split_iq ) )
+
+mod_poisson_lasso <- linear_reg(engine = 'glmnet', penalty = 0.01, mixture = 1) %>% 
+  set_args(family = 'poisson')
+
+
+```
+
+## entrenamiento en train
+
+```{r}
+
+fit_poisson_lasso_sj <- last_fit(
+  object = mod_poisson_lasso,
+  preprocessor = recipe_sj,
+  split = split_sj,
+  metrics = metric_set(mae)
+  
+)
+
+fit_poisson_lasso_iq <- last_fit(
+  object = mod_poisson_lasso,
+  preprocessor = recipe_iq,
+  split = split_iq,
+  metrics = metric_set(mae)
+  
+)
+```
+
+
+
+## predicción competición
+
+```{r }
+recipe_base_prep_sj <- prep( recipe_base(data_sj) )
+recipe_base_prep_iq <- prep( recipe_base(data_iq) )
+
+data_bake_sj <- bake( recipe_base_prep_sj, new_data = NULL )
+data_bake_iq <- bake( recipe_base_prep_iq, new_data = NULL )
+
+test_bake_sj <- bake( recipe_base_prep_sj, new_data = test_feat_sj )
+test_bake_iq <- bake( recipe_base_prep_iq, new_data = test_feat_iq )
+
+
+fit_poisson_lasso_sj_comp <- mod_poisson_lasso %>% 
+  fit( total_cases ~ ., data = data_bake_sj )
+
+fit_poisson_lasso_iq_comp <- mod_poisson_lasso %>% 
+  fit( total_cases ~ ., data = data_bake_iq )
+
+
+pred_poisson_lasso_sj_comp <- predict( fit_poisson_lasso_sj_comp, 
+                                       new_data = test_bake_sj )
+pred_poisson_lasso_iq_comp <- predict( fit_poisson_lasso_iq_comp, 
+                                       new_data = test_bake_iq )
+
+bind_rows(
+  test_feat_ori_sj[,1:3] %>% 
+    mutate( 'total_cases' = pred_poisson_lasso_sj_comp$.pred ),
+  
+  test_feat_ori_iq[,1:3] %>% 
+    mutate( 'total_cases' = pred_poisson_lasso_iq_comp$.pred )
+) %>% 
+  mutate( 'total_cases' = round(total_cases),
+          'total_cases' = ifelse(total_cases < 0, 0, total_cases)) %>% 
+  
+  readr::write_csv( 'Predicciones/lasso_poisson.csv' )
+
+
+
+```
+
+
+
+## Performance
+
+```{r}
+
+mae_ambas_lasso <- bind_rows(
+  fit_poisson_lasso_sj$.predictions[[1]] %>% 
+    select( .pred, total_cases ),
+  
+    fit_poisson_lasso_iq$.predictions[[1]] %>% 
+    select( .pred, total_cases )
+) %>% 
+  mutate( '.pred' = round(.pred),
+          '.pred' = ifelse(.pred < 0, 0, .pred)) %>% 
+  
+  mae( truth = total_cases, estimate = .pred ) %>% 
+  
+  pull(.estimate)
+
+
+
+```
+
+
+
+```{r}
+performance_lasso <- tibble(
+  'Modelo' = rep('Lasso Poisson',4),
+  'Ciudad' = c('San Juan','Iquitos','Ambas','Competición'),
+  'MAE' = c( collect_metrics(fit_poisson_lasso_sj)$.estimate, 
+             collect_metrics(fit_poisson_lasso_iq)$.estimate,
+             mae_ambas_lasso,
+             31.95
+  )
+) %>% 
+  mutate( MAE = round(MAE,2) ) %>% 
+  
+  tidyr::pivot_wider( names_from = Ciudad, values_from = MAE )
+
+performance_lasso
+```
+
+
+# Performance de ambos
+
+```{r}
+performance_modelos_base <- bind_rows(
+  performance_autoarima,
+  performance_lasso
+) 
+performance_modelos_base
+```
+
+```{r }
+saveRDS(performance_modelos_base, 'Perfomance/modelos_base.rds' )
+```
+
+```{r }
+library(flextable)
+flextable( performance_modelos_base ) %>% 
+  flextable::theme_vanilla() %>% 
+  flextable::save_as_docx( path = 'Perfomance/modelos_base.docx' )
+```
+
+
+
+
+
+
