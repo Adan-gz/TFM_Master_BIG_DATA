@@ -1,10 +1,11 @@
+
 # Detalles ----------------------------------------------------------------
 
 # Código relativo al punto 7 sobre generar un único modelo para las dos ciudades
 #• introduceindo la feature ciudad como una variable más.
 
 
-source('get_data.R',encoding = 'UTF-8')
+source('1_get_data.R',encoding = 'UTF-8')
 library(tidymodels)
 
 

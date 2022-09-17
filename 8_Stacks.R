@@ -1,5 +1,12 @@
 
-source('get_data.R',encoding = 'UTF-8')
+
+# Detalles ----------------------------------------------------------------
+
+# Código relativo al punto 7 sobre generar un stacks de modelos
+
+
+
+source('1_get_data.R',encoding = 'UTF-8')
 library(tidymodels);library(stacks)
 
 split_data <- initial_time_split(data, prop = .8)
@@ -7,6 +14,8 @@ split_data <- initial_time_split(data, prop = .8)
 set.seed(123)
 split_rolling <- rolling_origin( data, 1150, 250, skip = 4*5 )
 
+
+# preprocesamiento --------------------------------------------------------
 
 recipe_base <- function(df){
   
@@ -66,6 +75,9 @@ recipe_binning_mes <- function(df){
     step_dummy( all_nominal_predictors(), one_hot = TRUE ) 
     
 }
+
+
+# parsnip -----------------------------------------------------------------
 
 
 mod_xgboost_tune <- boost_tree(mode = 'regression',engine = 'xgboost') %>% 
