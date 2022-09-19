@@ -98,21 +98,20 @@ pred_sj <- collect_predictions( fit_sj ) %>%
 
 mse_sj <- collect_metrics(fit_sj)$.estimate
 
-max_distance_centroid <- sum( (pred_sj$total_cases - mean(pred_sj$total_cases))^2  )
+train_sj <- training(split_sj)
+mean_sj <- mean( train_sj$total_cases )
+
+max_distance_centroid <- sum( (train_sj$total_cases - mean(train_sj$total_cases))^2) 
 
 pred_sj <- pred_sj %>% 
   add_column( 'fecha' = testing(split_sj)$week_start_date,
               'city' = 'San Juan') %>% 
   mutate( 
-    .pred_low = .pred - 2.576 * sqrt(
-    
-       mse_sj * (1 + 1/nrow(pred_sj) +  (total_cases-mean(total_cases))^2/max_distance_centroid  )
-       ),
-    .pred_high = .pred + 2.576 * sqrt(
-      
-      mse_sj * (1 + 1/nrow(pred_sj) +  (total_cases-mean(total_cases))^2/max_distance_centroid  )
-    ),
-    )  
+    .pred_low = .pred - 2.576 * sqrt( mse_sj * ( 1 + 1/nrow(train_sj) +
+                       (( .pred - mean_sj )^2)/max_distance_centroid ) ),
+    .pred_high = .pred + 2.576 * sqrt( mse_sj * ( 1 + 1/nrow(train_sj) +
+                       (( .pred - mean_sj )^2)/max_distance_centroid ) )
+    ) 
 ```
 
 # Predicciones IQ 
@@ -123,23 +122,20 @@ pred_iq <- collect_predictions( fit_iq ) %>%
 
 mse_iq <- collect_metrics(fit_iq)$.estimate
 
-max_distance_centroid_iq <- sum( (pred_iq$total_cases - mean(pred_iq$total_cases))^2  )
+train_iq <- training(split_iq)
+mean_iq <- mean( train_iq$total_cases )
+
+max_distance_centroid <- sum( (train_iq$total_cases - mean(train_iq$total_cases))^2) 
 
 pred_iq <- pred_iq %>% 
   add_column( 'fecha' = testing(split_iq)$week_start_date,
               'city' = 'Iquitos') %>% 
   mutate( 
-    .pred_low = .pred - 2.576 * sqrt(
-      
-      mse_iq * (1 + 1/nrow(pred_iq) +  (total_cases-mean(total_cases))^2/max_distance_centroid_iq  )
-    ),
-    .pred_high = .pred + 2.576 * sqrt(
-      
-      mse_iq * (1 + 1/nrow(pred_iq) +  (total_cases-mean(total_cases))^2/max_distance_centroid_iq  )
-    ),
-  )  
-
-
+    .pred_low = .pred - 2.576 * sqrt( mse_iq * ( 1 + 1/nrow(train_iq) +
+                       (( .pred - mean_iq )^2)/max_distance_centroid ) ),
+    .pred_high = .pred + 2.576 * sqrt( mse_iq * ( 1 + 1/nrow(train_iq) +
+                       (( .pred - mean_iq )^2)/max_distance_centroid ) )
+    ) 
 
 df_pred <- pred_sj %>% 
   bind_rows( pred_iq ) %>% 

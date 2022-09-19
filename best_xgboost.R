@@ -2,7 +2,7 @@
 
 # Modelos resultantes del script 5_Primeros_Modelos.RMD
 
-best_xgboost <- readRDS('Perfomance/5_best_xgboost.RDS')
+best_xgboost <- readRDS('Modelos/5_best_xgboost.RDS')
 
 mod_xgboost_best_sj <- parsnip::boost_tree(mode = 'regression',engine = 'xgboost') %>% 
   parsnip::set_args(tree_depth     = best_xgboost$tree_depth[1],

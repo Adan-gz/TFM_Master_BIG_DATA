@@ -36,7 +36,7 @@ data_iq <- data_iq[-1,] ## eliminamos la primera
 
 ## también aplicamos los lags correspondientesa los datos de test de competicion
 
-test_features <- readr::read_csv('../data_raw/dengue_features_test.csv') %>% 
+test_features <- readr::read_csv('data_raw/dengue_features_test.csv') %>% 
   mutate( total_cases = 1 ) %>% 
   select( all_of( names(data) ) )
 
